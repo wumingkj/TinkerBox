@@ -1,0 +1,40 @@
+# ---- Gradle 构建产物 ----
+.gradle/
+build/
+*/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ---- 本地配置（含签名、密钥，绝不上传）----
+local.properties
+*.jks
+*.keystore
+*.p12
+*.key
+signing.properties
+*.keystore.properties
+
+# ---- 签名 / 加固缓存工具 ----
+apk/
+outputs/
+*.apk
+*.aab
+*.dex
+
+# ---- IDE ----
+.idea/
+*.iml
+.vscode/
+*.hprof
+*.log
+kotlin-js-store/
+
+# ---- 系统 / OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 日志与临时文件 ----
+*.log.*
+.pio/

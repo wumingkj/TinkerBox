@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  前景层：仪表盘图形，透明底（背景深蓝渐变在 ic_launcher_background.xml）。
+  VectorDrawable 的 fillColor 不支持 url(#...) 引用，
+  因此把用户提供的圆角背景 path 移除，交给自适应 background 层承载。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 底环：270°，底部留 90° 缺口 -->
+    <path
+        android:strokeColor="#334155"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:pathData="M34.2,73.8 A28,28,0,1,1,73.8,73.8" />
+
+    <!-- 进度弧-青 -->
+    <path
+        android:strokeColor="#22D3EE"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:pathData="M34.2,73.8 A28,28,0,0,1,40,29.75" />
+
+    <!-- 进度弧-紫 -->
+    <path
+        android:strokeColor="#A855F7"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:pathData="M40,29.75 A28,28,0,0,1,81,46.7" />
+
+    <!-- 指针 -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#F8FAFC"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:pathData="M54,54 L62.12,39.94" />
+
+    <!-- 中心圆 -->
+    <path
+        android:fillColor="#F8FAFC"
+        android:pathData="M54,48.5 C57.0376,48.5,59.5,50.9624,59.5,54 C59.5,57.0376,57.0376,59.5,54,59.5 C50.9624,59.5,48.5,57.0376,48.5,54 C48.5,50.9624,50.9624,48.5,54,48.5 Z" />
+</vector>
