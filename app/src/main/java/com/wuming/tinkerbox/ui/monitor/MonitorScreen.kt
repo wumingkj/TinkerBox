@@ -421,13 +421,20 @@ private fun BatteryCard(power: PowerState) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                // 电压 / 电流 / 功率三列。
+                // 电压 / 电流 / 功率三列。双电芯时电压拆为电芯0/电芯1 两列。
                 Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    PowerMetric("电压", String.format(Locale.US, "%.2fV", power.voltageV))
+                    if (power.isDualCell) {
+                        val v0 = power.cellVoltages.getOrElse(0) { power.voltageV }
+                        val v1 = power.cellVoltages.getOrElse(1) { power.voltageV }
+                        PowerMetric("电芯0", String.format(Locale.US, "%.2fV", v0))
+                        PowerMetric("电芯1", String.format(Locale.US, "%.2fV", v1))
+                    } else {
+                        PowerMetric("电压", String.format(Locale.US, "%.2fV", power.voltageV))
+                    }
                     PowerMetric(
                         "电流",
-                        if (power.hasCurrent) fmtCurrent(power.currentMa) else "未就绪",
-                        highlight = power.currentMa < 0,
+                        if (power.hasCurrent) fmtCurrent(power.currentMa ?: 0.0) else "未就绪",
+                        highlight = (power.currentMa ?: 0.0) < 0,
                     )
                     PowerMetric("功率", if (power.powerW > 0) String.format(Locale.US, "%.2fW", power.powerW) else "—")
                 }
@@ -457,10 +464,11 @@ private fun PowerMetric(label: String, value: String, highlight: Boolean = false
     }
 }
 
-/** 电流格式化：负值=放电（带负号），正值=充电（带 + 号），末尾 mA。 */
-private fun fmtCurrent(ma: Int): String {
-    if (ma == Int.MIN_VALUE) return "未就绪"
-    return if (ma < 0) "${ma} mA" else "+${ma} mA"
+/** 电流格式化：负值=放电（带负号），正值=充电（带 + 号），末尾 mA；保留一位小数。 */
+private fun fmtCurrent(ma: Double): String {
+    if (ma.isNaN()) return "未就绪"
+    val s = if (ma < 0) "%.1f" else "+%.1f"
+    return String.format(Locale.US, s + " mA", ma)
 }
 
 /** 内存占用紧凑行：内存 + swap 占用率与进度条。 */

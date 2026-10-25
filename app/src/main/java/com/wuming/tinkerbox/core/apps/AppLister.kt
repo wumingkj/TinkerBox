@@ -17,6 +17,8 @@ data class AppListItem(
     val frozenCause: String,
     val icon: ImageBitmap?,
     val iconKey: String,
+    val firstInstallTime: Long = 0L,
+    val sizeBytes: Long = 0L,
 )
 
 /** 图标目标尺寸（像素）。固定在合理大小，避免超大位图与内存抖动。 */
@@ -45,15 +47,14 @@ class AppLister(
     /**
      * 返回已安装应用列表，已按真实冻结状态标注。
      *
-     * @param userFrozen 用户在本 App 中主动冻结过的包集合。仅用于约束
-     *        `disabled`（停用/禁用）判定：ColorOS / 系统会把大量长期未打开
-     *        的闲置应用自动标记为 `enabled=false`，若不加约束会把它们全部
-     *        误判为冻结。而 `suspended`（挂起）与 `hidden`（隐藏）是系统
-     *        明确的冻结标志，始终无条件生效，无需白名单。
+     * 冻结状态完全由系统明确标志实时判定，无需任何本地记录：
+     *  - `suspended`（挂起，FLAG_SUSPENDED）与 `hidden`（隐藏，privateFlags）
+     *    是系统权威标志，始终无条件生效。
+     *  - 不把 `enabled==false` 视为冻结：那通常是 ColorOS / 系统智能停用的
+     *    闲置应用伪影，可被系统随时改回，不应算作真正的用户冻结。
      */
     fun load(
         withIcons: Boolean = true,
-        userFrozen: Set<String> = emptySet(),
         showSystem: Boolean = true,
         showThirdParty: Boolean = true,
     ): List<AppListItem> {
@@ -69,7 +70,7 @@ class AppLister(
             if (isSystem && !showSystem) return@forEach
             if (!isSystem && !showThirdParty) return@forEach
 
-            val state = freezeStateOf(ai, ai.packageName in userFrozen)
+            val state = freezeStateOf(ai)
             val label = runCatching { ai.loadLabel(pm).toString() }.getOrDefault(ai.packageName)
             apps += AppListItem(
                 packageName = ai.packageName,
@@ -78,7 +79,13 @@ class AppLister(
                 isFrozen = state != null,
                 frozenCause = state.orEmpty(),
                 icon = if (withIcons) runCatching { ai.loadIcon(pm).toImageBitmap() }.getOrNull() else null,
-                iconKey = "${ai.packageName}_${ai.icon ?: 0}",
+                iconKey = "${ai.packageName}_${ai.icon}",
+                firstInstallTime = runCatching {
+                    pm.getPackageInfo(ai.packageName, PackageManager.MATCH_UNINSTALLED_PACKAGES)
+                        .firstInstallTime
+                }.getOrDefault(0L),
+                sizeBytes = runCatching { ai.sourceDir?.let { java.io.File(it).length() } ?: 0L }
+                    .getOrDefault(0L),
             )
         }
         apps.sortBy { it.label.lowercase() }
@@ -88,13 +95,12 @@ class AppLister(
     /**
      * 计算单个 [ApplicationInfo] 的冻结状态；未冻结返回 null，冻结返回原因标记。
      *
-     * @param userAuthored 该包是否出现在用户主动冻结记录中。仅当为 true 时
-     *        `enabled==false` 才被认定为「停用/禁用」冻结；否则 ColorOS 智能
-     *        停用闲置应用产生的 `enabled=false` 会被忽略，避免大量误报。
+     * 仅看系统权威、可实时读回的标志：
+     *  - `suspended`：FLAG_SUSPENDED（灰图标、挂起）。
+     *  - `hidden`   ：privateFlags 最低位（隐藏）。
+     * 停用（enabled==false）不作为冻结判定，避免 ColorOS 智能停用伪影误报。
      */
-    private fun freezeStateOf(ai: ApplicationInfo, userAuthored: Boolean): String? {
-        // 停用 / 禁用：enabled==false（仅当用户主动冻结过才可信，过滤系统智能停用伪影）
-        if (!ai.enabled && userAuthored) return "disabled"
+    private fun freezeStateOf(ai: ApplicationInfo): String? {
         // 挂起（灰图标）：FLAG_SUSPENDED，系统明确标志，无条件可信
         if (ai.flags and ApplicationInfo.FLAG_SUSPENDED != 0) return "suspended"
         // 隐藏：privateFlags 最低位（反射读取，失败视为非隐藏），系统明确标志，无条件可信

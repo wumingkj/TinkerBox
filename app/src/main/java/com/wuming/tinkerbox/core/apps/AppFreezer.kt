@@ -118,6 +118,13 @@ class AppFreezer(
         return succeeded
     }
 
+    /** 卸载应用（静默，面向三方应用；系统应用一般会失败并返回 false）。 */
+    fun uninstall(pkg: String): Boolean = runCatching {
+        // 保留 /data，仅移除当前用户视图；系统应用失败时由调用方兜底提示
+        val r = exec("pm", "uninstall", "--user", "0", pkg)
+        r.exitCode == 0 || r.isSuccess
+    }.getOrDefault(false)
+
     private fun execSuccess(vararg args: String): Boolean = runCatching {
         val r = exec(*args)
         r.exitCode == 0 || r.isSuccess
@@ -144,19 +151,20 @@ enum class FreezeState {
 }
 
 /**
- * 完整冻结模式集合（专业命名，供玩机用户直接识别）。
+ * 操作模式集合（冻结时可选择的动作）。
+ *
+ * 只保留轻量的「挂起」与「隐藏」两类：
+ *  - 挂起 SUSPEND：立即停掉运行中进程并挂起（灰图标、不可启动），解冻即恢复。
+ *  - 隐藏 HIDE   ：从桌面/启动器中隐藏图标，应用本体仍在、可用于不再想看到的预装应用。
+ * 停用 / 禁用已被移除：语义过重，系统应用深受其害，一般不作为日常玩法操作。
  */
 enum class FreezeMode(val title: String, val desc: String) {
-    DISABLE_USER("停用", "pm disable-user，图标保留、卸载入口变灰"),
-    DISABLE("禁用", "pm disable，完全禁用、启动崩溃"),
-    HIDE("隐藏", "pm hide，图标从桌面消失"),
-    SUSPEND("挂起", "pm suspend，立即停止并冻结运行"),
+    HIDE("隐藏", "(隐藏桌面图标,无法运行)"),
+    SUSPEND("挂起", "(图标变灰,无法运行)"),
     ;
 
     /** 生成对应 pm 冻结命令。 */
     fun command(pkg: String): Array<String> = when (this) {
-        DISABLE_USER -> arrayOf("pm", "disable-user", "--user", "0", pkg)
-        DISABLE -> arrayOf("pm", "disable", "--user", "0", pkg)
         HIDE -> arrayOf("pm", "hide", "--user", "0", pkg)
         SUSPEND -> arrayOf("pm", "suspend", "--user", "0", pkg)
     }

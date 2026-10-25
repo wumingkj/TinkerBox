@@ -25,10 +25,7 @@ object DeviceInfo {
         val hw = cpuinfo.hardware?.takeIf { it.isNotBlank() && it != "Unknown" }
             ?: Build.HARDWARE.takeIf { it.isNotBlank() }
             ?: "未知"
-        val soc = Build.SOC_MODEL.takeIf { it.isNotBlank() }
-            ?: hw
-            ?: cpuinfo.modelName
-            ?: "未知"
+        val soc = Build.SOC_MODEL.takeIf { it.isNotBlank() } ?: hw
         return DeviceConf(
             soc = soc,
             hardware = hw,

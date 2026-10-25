@@ -8,11 +8,15 @@ import com.wuming.tinkerbox.core.mode.ModeRepository
 import com.wuming.tinkerbox.core.mode.PermissionChecker
 import com.wuming.tinkerbox.core.mode.PermissionMode
 import com.wuming.tinkerbox.core.root.RootBackend
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 应用级状态：管理权限模式 + 各模式能力检测。
@@ -21,11 +25,19 @@ import kotlinx.coroutines.launch
  *  - 读取已保存的模式，并检测各模式当前是否可用。
  *  - 若已保存的模式所需权限已失效（如 Root 掉了），回退到未选择状态（[ModeUiState.mode] = null），
  *    跳回模式选择界面；普通模式始终可用，不受影响。
+ *
+ * 运行中全局降级：
+ *  - 后台定时校验当前模式所需权限；若失效（root 被关 / adb 掉线），
+ *    自动持久化降到更低一档仍可用的模式（Root→Shizuku→普通），
+ *    让设置页「运行模式」与所有 tab 一并感知，而不是只在单个功能内局部降。
  */
 class ModeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repository = ModeRepository(app.applicationContext)
     private val checker = PermissionChecker(app.applicationContext)
+
+    /** 全局降级轮询间隔（毫秒）。 */
+    private val degradeIntervalMs = 3500L
 
     private val _uiState = MutableStateFlow(ModeUiState())
     val uiState: StateFlow<ModeUiState> = _uiState.asStateFlow()
@@ -45,6 +57,37 @@ class ModeViewModel(app: Application) : AndroidViewModel(app) {
                 capabilities = caps,
                 backend = modeBackend(mode, caps),
                 loading = false,
+            )
+
+            // 运行中守护：当前模式权限失效时全局降级（root → shizuku → 普通）。
+            while (isActive) {
+                delay(degradeIntervalMs)
+                val current = _uiState.value.mode ?: continue
+                if (current == PermissionMode.NORMAL) continue
+                val capsNow = withContext(Dispatchers.IO) { detectAllFor(current) }
+                if (capsNow[current]?.available == true) continue
+
+                val fallback: PermissionMode = when (current) {
+                    PermissionMode.ROOT ->
+                        if (withContext(Dispatchers.IO) { checker.checkShizuku().available })
+                            PermissionMode.SHIZUKU
+                        else PermissionMode.NORMAL
+                    else -> PermissionMode.NORMAL
+                }
+                downgradeTo(fallback)
+            }
+        }
+    }
+
+    /** 全局降级：持久化 + 更新能力状态与后端，供设置页与各 tab 即时刷新。 */
+    private fun downgradeTo(fallback: PermissionMode) {
+        viewModelScope.launch {
+            repository.save(fallback)
+            val fbCaps = withContext(Dispatchers.IO) { detectAllFor(fallback) }
+            _uiState.value = _uiState.value.copy(
+                mode = fallback,
+                capabilities = _uiState.value.capabilities + fbCaps,
+                backend = modeBackend(fallback, _uiState.value.capabilities + fbCaps),
             )
         }
     }

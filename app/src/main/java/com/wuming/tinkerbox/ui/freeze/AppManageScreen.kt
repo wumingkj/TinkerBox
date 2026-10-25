@@ -1,5 +1,10 @@
 package com.wuming.tinkerbox.ui.freeze
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import android.util.Log
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,17 +20,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -42,12 +46,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wuming.tinkerbox.core.apps.AppListItem
-import com.wuming.tinkerbox.core.apps.CommandLog
 import com.wuming.tinkerbox.core.apps.FreezeMode
 
 /**
@@ -69,7 +73,9 @@ fun AppManageScreen(viewModel: AppManageViewModel) {
 
     var tabIndex by remember { mutableStateOf(0) }
     var query by remember { mutableStateOf("") }
-    var showLog by remember { mutableStateOf(false) }
+    var sortKey by remember { mutableStateOf(SortKey.NAME) }
+    var ascending by remember { mutableStateOf(true) }
+    var showSortMenu by remember { mutableStateOf(false) }
     val tabs = arrayOf("第三方", "系统", "已冻结")
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -95,8 +101,41 @@ fun AppManageScreen(viewModel: AppManageViewModel) {
             IconButton(onClick = viewModel::load) {
                 Icon(imageVector = Icons.Filled.Refresh, contentDescription = "刷新")
             }
-            IconButton(onClick = { showLog = true }) {
-                Icon(imageVector = Icons.Filled.List, contentDescription = "命令日志")
+            Box {
+                IconButton(onClick = { showSortMenu = true }) {
+                    Icon(imageVector = Icons.Filled.Sort, contentDescription = "排序")
+                }
+                DropdownMenu(
+                    expanded = showSortMenu,
+                    onDismissRequest = { showSortMenu = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("排序方式") },
+                        enabled = false,
+                        onClick = {},
+                    )
+                    SortKey.entries.forEach { key ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(if (key == sortKey) "${key.title} ✓" else key.title)
+                            },
+                            onClick = {
+                                sortKey = key
+                                showSortMenu = false
+                            },
+                        )
+                    }
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (ascending) "升序 ✓" else "降序 ✓")
+                        },
+                        onClick = {
+                            ascending = !ascending
+                            showSortMenu = false
+                        },
+                    )
+                }
             }
         }
 
@@ -120,8 +159,12 @@ fun AppManageScreen(viewModel: AppManageViewModel) {
                     FrozenPanel(
                         apps = state.frozenApps,
                         canFreeze = state.canFreeze,
+                        canSilentUninstall = viewModel.canSilentUninstall,
+                        onSilentUninstall = viewModel::uninstall,
                         query = query,
                         onQueryChange = { query = it },
+                        sortKey = sortKey,
+                        ascending = ascending,
                         onUnfreezeAll = viewModel::unfreezeAll,
                         onUnfreezeClick = { app ->
                             pendingAction = PendingAction(app, mode = null, currentlyFrozen = true)
@@ -142,7 +185,11 @@ fun AppManageScreen(viewModel: AppManageViewModel) {
                         apps = filtered,
                         isSystemTab = tabIndex == 1,
                         canFreeze = state.canFreeze,
+                        canSilentUninstall = viewModel.canSilentUninstall,
+                        onSilentUninstall = viewModel::uninstall,
                         onModeClick = { app, mode -> pendingAction = PendingAction(app, mode) },
+                        sortKey = sortKey,
+                        ascending = ascending,
                     )
                 }
             }
@@ -159,10 +206,6 @@ fun AppManageScreen(viewModel: AppManageViewModel) {
                 pendingAction = null
             },
         )
-    }
-
-    if (showLog) {
-        CommandLogDialog(onClose = { showLog = false })
     }
 }
 
@@ -181,13 +224,17 @@ private fun SearchBox(query: String, onQueryChange: (String) -> Unit) {
     )
 }
 
-/** 未冻结应用列表（可冻结）。 */
+/** 未冻结应用列表（可冻结 + 打开/详情/卸载）。 */
 @Composable
 private fun AppList(
     apps: List<AppListItem>,
     isSystemTab: Boolean,
     canFreeze: Boolean,
+    canSilentUninstall: Boolean,
+    onSilentUninstall: (String) -> Boolean,
     onModeClick: (AppListItem, FreezeMode) -> Unit,
+    sortKey: SortKey,
+    ascending: Boolean,
 ) {
     if (apps.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -195,15 +242,20 @@ private fun AppList(
         }
         return
     }
+    val sorted = remember(apps, sortKey, ascending) {
+        sortApps(apps, sortKey, ascending)
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(apps, key = { it.packageName }) { app ->
+        items(sorted, key = { it.packageName }) { app ->
             AppRowItem(
                 app = app,
                 canFreeze = canFreeze,
+                canSilentUninstall = canSilentUninstall,
+                onSilentUninstall = onSilentUninstall,
                 onModeClick = { mode -> onModeClick(app, mode) },
             )
         }
@@ -215,8 +267,12 @@ private fun AppList(
 private fun FrozenPanel(
     apps: List<AppListItem>,
     canFreeze: Boolean,
+    canSilentUninstall: Boolean,
+    onSilentUninstall: (String) -> Boolean,
     query: String,
     onQueryChange: (String) -> Unit,
+    sortKey: SortKey,
+    ascending: Boolean,
     onUnfreezeAll: () -> Unit,
     onUnfreezeClick: (AppListItem) -> Unit,
 ) {
@@ -236,12 +292,13 @@ private fun FrozenPanel(
         }
     }
 
-    val filtered = remember(apps, query) {
-        if (query.isBlank()) apps
+    val filtered = remember(apps, query, sortKey, ascending) {
+        val f = if (query.isBlank()) apps
         else apps.filter {
             it.label.contains(query, ignoreCase = true) ||
                 it.packageName.contains(query, ignoreCase = true)
         }
+        sortApps(f, sortKey, ascending)
     }
 
     if (filtered.isEmpty()) {
@@ -259,7 +316,10 @@ private fun FrozenPanel(
             FrozenRow(
                 app = app,
                 canFreeze = canFreeze,
+                canSilentUninstall = canSilentUninstall,
+                onSilentUninstall = onSilentUninstall,
                 onUnfreezeClick = { onUnfreezeClick(app) },
+                onModeClick = { },
             )
         }
     }
@@ -290,8 +350,11 @@ private data class PendingAction(
 private fun AppRowItem(
     app: AppListItem,
     canFreeze: Boolean,
+    canSilentUninstall: Boolean,
+    onSilentUninstall: (String) -> Boolean,
     onModeClick: (FreezeMode) -> Unit,
 ) {
+    val context = LocalContext.current
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -316,21 +379,37 @@ private fun AppRowItem(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (canFreeze) {
-                Spacer(Modifier.width(12.dp))
-                AppFreezeMenu(onModeClick = onModeClick)
-            }
+            AppActionsMenu(
+                app = app,
+                canFreeze = canFreeze,
+                canUninstall = canSilentUninstall || !app.isSystem,
+                onOpen = { openApp(context, app) },
+                onDetails = { showAppDetails(context, app) },
+                onUninstall = { uninstallApp(context, app, canSilentUninstall, onSilentUninstall) },
+                onUnfreezeClick = {
+                    // 未冻结列表不会触发解冻；此处给冻结模式选择兜底
+                    // （若应用意外处于冻结态，直接走解冻对话框语义）
+                },
+                onModeClick = onModeClick,
+            )
         }
     }
 }
 
-/** 已冻结应用行：显式展示状态并提供「解冻」按钮。 */
+private typealias OnModeClick = (FreezeMode) -> Unit
+private typealias OnUnfreezeClick = () -> Unit
+
+/** 已冻结应用行：显式展示状态，右侧提供「三点菜单」供解冻/打开/详情/卸载。 */
 @Composable
 private fun FrozenRow(
     app: AppListItem,
     canFreeze: Boolean,
+    canSilentUninstall: Boolean,
+    onSilentUninstall: (String) -> Boolean,
     onUnfreezeClick: () -> Unit,
+    onModeClick: (FreezeMode) -> Unit,
 ) {
+    val context = LocalContext.current
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -355,10 +434,16 @@ private fun FrozenRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (canFreeze) {
-                Spacer(Modifier.width(12.dp))
-                TextButton(onClick = onUnfreezeClick) { Text("解冻") }
-            }
+            AppActionsMenu(
+                app = app,
+                canFreeze = canFreeze,
+                canUninstall = canSilentUninstall || !app.isSystem,
+                onOpen = { openApp(context, app) },
+                onDetails = { showAppDetails(context, app) },
+                onUninstall = { uninstallApp(context, app, canSilentUninstall, onSilentUninstall) },
+                onUnfreezeClick = onUnfreezeClick,
+                onModeClick = onModeClick,
+            )
         }
     }
 }
@@ -387,22 +472,127 @@ private fun AppIcon(icon: androidx.compose.ui.graphics.ImageBitmap?) {
     }
 }
 
+/**
+ * 应用行操作菜单（三点）。
+ *
+ * 所有模式可用：打开 / 详情 / 卸载（卸载依权限走静默或系统界面）。
+ * 仅具备冻结能力时追加：解冻（若已冻结）/ 挂起 / 隐藏。
+ */
 @Composable
-private fun AppFreezeMenu(onModeClick: (FreezeMode) -> Unit) {
+private fun AppActionsMenu(
+    app: AppListItem,
+    canFreeze: Boolean,
+    canUninstall: Boolean,
+    onOpen: () -> Unit,
+    onDetails: () -> Unit,
+    onUninstall: () -> Unit,
+    onUnfreezeClick: () -> Unit,
+    onModeClick: OnModeClick,
+) {
     var menu by remember { mutableStateOf(false) }
+
     Box {
-        Button(onClick = { menu = true }) { Text("冻结") }
+        IconButton(onClick = { menu = true }) {
+            Icon(
+                imageVector = Icons.Filled.MoreVert,
+                contentDescription = "更多操作",
+            )
+        }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-            FreezeMode.entries.forEach { mode ->
+            DropdownMenuItem(
+                text = { Text("打开") },
+                onClick = { menu = false; onOpen() },
+            )
+            DropdownMenuItem(
+                text = { Text("详情") },
+                onClick = { menu = false; onDetails() },
+            )
+            // 普通模式（无静默卸载权限）下，系统应用本就无法卸载，不提供「卸载」，避免误导。
+            if (canUninstall) {
                 DropdownMenuItem(
-                    text = { Text("${mode.title} ${mode.desc}") },
-                    onClick = {
-                        menu = false
-                        onModeClick(mode)
-                    },
+                    text = { Text("卸载") },
+                    onClick = { menu = false; onUninstall() },
                 )
             }
+            if (canFreeze) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                if (app.isFrozen) {
+                    DropdownMenuItem(
+                        text = { Text("解冻") },
+                        onClick = { menu = false; onUnfreezeClick() },
+                    )
+                } else {
+                    FreezeMode.entries.forEach { mode ->
+                        DropdownMenuItem(
+                            text = { Text("${mode.title} ${mode.desc}") },
+                            onClick = { menu = false; onModeClick(mode) },
+                        )
+                    }
+                }
+            }
         }
+    }
+}
+
+/** 打开应用（主启动器）。 */
+private fun openApp(context: Context, app: AppListItem) {
+    val launch = context.packageManager.getLaunchIntentForPackage(app.packageName)
+    if (launch != null) {
+        runCatching { context.startActivity(launch) }
+    }
+}
+
+/** 前往系统应用信息页。 */
+private fun showAppDetails(context: Context, app: AppListItem) {
+    runCatching {
+        val i = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:${app.packageName}"),
+        )
+        context.startActivity(i)
+    }
+}
+
+/** 卸载：有权限则静默 pm 卸载（结果走命令日志）；无权限则按应用类别顺畅降级到系统界面。 */
+private fun uninstallApp(
+    context: Context,
+    app: AppListItem,
+    canSilent: Boolean,
+    onSilentUninstall: (String) -> Boolean,
+) {
+    // 1) 有权静默卸载：直接执行，成功即返回
+    if (canSilent) {
+        val ok = onSilentUninstall(app.packageName)
+        Log.i("TinkerBoxUninstall", "canSilent=true result=$ok pkg=${app.packageName}")
+        if (ok) return
+    } else {
+        Log.i("TinkerBoxUninstall", "canSilent=false pkg=${app.packageName} isSystem=${app.isSystem}")
+    }
+
+    // 2) 无权静默 / 静默失败：走系统界面降级。
+    //    - 系统应用：普通模式本无卸载权限（即使声明 REQUEST_DELETE_PACKAGES 也卸不了系统应用），
+    //      跳详情页观察，避免误导。
+    //    - 三方应用：调起系统确认卸载器（ACTION_UNINSTALL_PACKAGE）。
+    //      ⚠ 依赖 manifest 已声明 android.permission.REQUEST_DELETE_PACKAGES，
+    //      否则 ColorOS 等的定卸载器会静默丢弃（需系统判定调用者有「请求删除」资格）。
+    if (app.isSystem) {
+        Log.i("TinkerBoxUninstall", "系统应用，跳详情页而非卸载器")
+        runCatching { showAppDetails(context, app) }
+        return
+    }
+
+    runCatching {
+        val intent = Intent(
+            Intent.ACTION_UNINSTALL_PACKAGE,
+            Uri.parse("package:${app.packageName}"),
+        )
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        Log.i("TinkerBoxUninstall", "startActivity ACTION_UNINSTALL_PACKAGE pkg=${app.packageName}")
+        context.startActivity(intent)
+    }.onFailure { e ->
+        Log.e("TinkerBoxUninstall", "ACTION_UNINSTALL_PACKAGE 启动失败: ${e.javaClass.name}: ${e.message}", e)
+        // 部分 ROM 无独立卸载器 Activity：兜底跳详情页，由系统详情页内的「卸载」按钮完成
+        runCatching { showAppDetails(context, app) }
     }
 }
 
@@ -435,7 +625,7 @@ private fun FreezeConfirmDialog(
                 )
             },
             confirmButton = {
-                TextButton(onClick = { onConfirmed(action.mode ?: FreezeMode.DISABLE_USER) }) {
+                TextButton(onClick = { onConfirmed(action.mode ?: FreezeMode.HIDE) }) {
                     Text(if (action.currentlyFrozen) "解冻" else "冻结")
                 }
             },
@@ -476,7 +666,7 @@ private fun FreezeConfirmDialog(
                 Text("系统应用可能为系统组件所依赖。冻结它可能导致部分功能失效或异常。\n\n确认后立即执行。")
             },
             confirmButton = {
-                TextButton(onClick = { onConfirmed(action.mode ?: FreezeMode.DISABLE_USER) }) {
+                TextButton(onClick = { onConfirmed(action.mode ?: FreezeMode.HIDE) }) {
                     Text(if (action.currentlyFrozen) "确认解冻" else "确认冻结")
                 }
             },
@@ -487,80 +677,19 @@ private fun FreezeConfirmDialog(
     }
 }
 
-/** 命令日志对话框：实时展示所有已执行命令、退出码与输出。 */
-@Composable
-private fun CommandLogDialog(onClose: () -> Unit) {
-    val entries by CommandLog.entries.collectAsStateWithLifecycle()
-
-    AlertDialog(
-        onDismissRequest = onClose,
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("命令日志", modifier = Modifier.weight(1f))
-                TextButton(onClick = { CommandLog.clear() }) { Text("清空") }
-            }
-        },
-        text = {
-            if (entries.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("暂无命令记录", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            } else {
-                Column(
-                    modifier = Modifier.fillMaxWidth().height(380.dp)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    entries.reversed().forEach { e ->
-                        LogRow(entry = e)
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onClose) { Text("关闭") }
-        },
-    )
+/** 应用列表排序维度。 */
+private enum class SortKey(val title: String) {
+    NAME("按名称"),
+    INSTALL_TIME("按安装时间"),
+    SIZE("按占用空间"),
 }
 
-/** 单条日志行。 */
-@Composable
-private fun LogRow(entry: com.wuming.tinkerbox.core.apps.LogEntry) {
-    val color = if (entry.ok) {
-        MaterialTheme.colorScheme.onSurface
-    } else {
-        MaterialTheme.colorScheme.error
+/** 按 [SortKey] 与升降序对应用列表排序。 */
+private fun sortApps(apps: List<AppListItem>, key: SortKey, ascending: Boolean): List<AppListItem> {
+    val sorted = when (key) {
+        SortKey.NAME -> apps.sortedBy { it.label.lowercase() }
+        SortKey.INSTALL_TIME -> apps.sortedBy { it.firstInstallTime }
+        SortKey.SIZE -> apps.sortedBy { it.sizeBytes }
     }
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(10.dp)) {
-            Text(
-                text = "${entry.time}  exit=${entry.exitCode}",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (entry.ok) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.error
-                },
-            )
-            Text(
-                text = entry.command,
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.Medium,
-            )
-            if (entry.stdout.isNotBlank()) {
-                Text(
-                    text = entry.stdout,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = color,
-                )
-            }
-            if (entry.stderr.isNotBlank() && entry.stderr != entry.stdout) {
-                Text(
-                    text = "stderr: ${entry.stderr}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-        }
-    }
+    return if (ascending) sorted else sorted.reversed()
 }

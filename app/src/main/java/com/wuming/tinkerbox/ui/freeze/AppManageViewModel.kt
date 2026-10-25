@@ -7,7 +7,7 @@ import com.wuming.tinkerbox.core.apps.AppFreezer
 import com.wuming.tinkerbox.core.apps.AppListItem
 import com.wuming.tinkerbox.core.apps.AppLister
 import com.wuming.tinkerbox.core.apps.FreezeMode
-import com.wuming.tinkerbox.core.apps.FrozenRepository
+import com.wuming.tinkerbox.TinkerBoxApp
 import com.wuming.tinkerbox.core.mode.PermissionMode
 import com.wuming.tinkerbox.core.mode.ShizukuManager
 import com.wuming.tinkerbox.core.root.RootDetector
@@ -15,7 +15,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -49,9 +48,6 @@ class AppManageViewModel(
     /** 本应用自身包名（debug 后缀已含），在列表中排除，避免误冻结自己。 */
     private val ownPackage = getApplication<Application>().packageName
 
-    /** 持久化用户手动冻结的包集合（区别于系统检测的大量 disabled）。 */
-    private val frozenRepo = FrozenRepository(getApplication())
-
     private val _uiState = MutableStateFlow(
         AppManageUiState(canFreeze = freezer != null, freezerLabel = mode.displayName),
     )
@@ -66,23 +62,20 @@ class AppManageViewModel(
 
     /** 刷新应用列表：先快速出列表（无图标），后台再补图标。
      *
-     * 冻结状态完全由 SDK 直读（enabled / FLAG_SUSPENDED / privateFlags），
-     * 不依赖 shell 命令——与 Hail 一致，可正确识别 ColorOS 上挂起的应用。
+     * 冻结状态由 SDK 直读（FLAG_SUSPENDED / privateFlags）实时判定，
+     * 不依赖任何本地记录，也不依赖 shell 命令——与 Hail 一致，
+     * 可正确识别 ColorOS 上挂起的应用。
      */
     fun load() {
         viewModelScope.launch(Dispatchers.IO) {
-            // 读取用户主动冻结记录，作为 disabled 判定白名单，
-            // 过滤掉 ColorOS 智能停用闲置应用产生的大量 enabled=false 伪影。
-            val userFrozen = runCatching { frozenRepo.frozenFlow.first() }.getOrDefault(emptySet())
-
             // 阶段一：快速出列表（不加载图标，立即展示）。
-            val fast = runCatching { lister.load(withIcons = false, userFrozen = userFrozen) }
+            val fast = runCatching { lister.load(withIcons = false) }
                 .getOrDefault(emptyList())
                 .filterNot { it.packageName == ownPackage }
             emit(applyAppState(fast))
 
             // 阶段二：后台补图标，再一次完整刷新。
-            val full = runCatching { lister.load(withIcons = true, userFrozen = userFrozen) }
+            val full = runCatching { lister.load(withIcons = true) }
                 .getOrDefault(emptyList())
                 .filterNot { it.packageName == ownPackage }
             emit(applyAppState(full))
@@ -91,6 +84,11 @@ class AppManageViewModel(
 
     private fun emit(s: AppManageUiState) {
         _frozenNames.value = s.frozenApps.map { it.packageName }.toSet()
+        // 同步真实冻结计数（第三方 / 系统）到全局，供底栏「应用管理」角标实时反映。
+        (getApplication() as? TinkerBoxApp)?.updateFrozenCounts(
+            thirdParty = s.frozenApps.count { !it.isSystem },
+            system = s.frozenApps.count { it.isSystem },
+        )
         _uiState.value = s
     }
 
@@ -120,25 +118,23 @@ class AppManageViewModel(
 
     fun isFrozen(pkg: String): Boolean = _frozenNames.value.contains(pkg)
 
-    /** 冻结（mode 决定具体 pm 命令）。冻结成功后写入持久化集合。 */
+    /** 冻结（mode 决定具体 pm 命令）。成功后重扫列表。 */
     fun freeze(pkg: String, mode: FreezeMode) {
         viewModelScope.launch(Dispatchers.IO) {
             val f = freezer ?: return@launch
             if (f.freeze(pkg, mode)) {
-                runCatching { frozenRepo.add(pkg) }
+                load()
             }
-            load()
         }
     }
 
-    /** 解冻。解冻成功后从持久化集合移除。 */
+    /** 解冻。成功后重扫列表。 */
     fun unfreeze(pkg: String) {
         viewModelScope.launch(Dispatchers.IO) {
             val f = freezer ?: return@launch
             if (f.unfreeze(pkg)) {
-                runCatching { frozenRepo.remove(pkg) }
+                load()
             }
-            load()
         }
     }
 
@@ -148,9 +144,19 @@ class AppManageViewModel(
             val f = freezer ?: return@launch
             val frozen = _frozenNames.value
             frozen.forEach { pkg -> runCatching { f.unfreeze(pkg) } }
-            runCatching { frozen.forEach { frozenRepo.remove(it) } }
             load()
         }
+    }
+
+    /** 是否可静默卸载（root / shizuku 经 pm 直卸）。普通模式返回 false，由 UI 走系统卸载界面。 */
+    val canSilentUninstall: Boolean get() = freezer != null
+
+    /** 静默卸载。有权限则 pm 直卸并刷新；无权限返回 false，由调用方走系统卸载界面。 */
+    fun uninstall(pkg: String): Boolean {
+        val f = freezer ?: return false
+        val ok = runCatching { f.uninstall(pkg) }.getOrDefault(false)
+        load()
+        return ok
     }
 }
 
