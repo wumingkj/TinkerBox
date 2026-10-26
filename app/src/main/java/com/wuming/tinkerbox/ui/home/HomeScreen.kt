@@ -1,7 +1,10 @@
 package com.wuming.tinkerbox.ui.home
 
 import android.app.Application
-import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.background
@@ -21,8 +24,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,7 +37,6 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -68,6 +72,8 @@ fun HomeScreen(
     val items = remember { HomeTab.entries }
     val app = LocalContext.current.applicationContext as TinkerBoxApp
     val scope = rememberCoroutineScope()
+    // 设置页是否已进入二级/更高级子页：为 true 时隐藏全局底栏，让子页全屏。
+    var settingsNested by remember { mutableStateOf(false) }
 
     // 桌面式横向拼接分页：页面可左右滑动切换（像桌面划动），最左侧接最右侧不循环。
     val pagerState = rememberPagerState(
@@ -94,7 +100,10 @@ fun HomeScreen(
 
     // 返回键策略：默认回到首页监控台。当前不在监控台时，返回键不回桌面、先切回监控台，
     // 在监控台再按返回才正常退出（更高优先级的页内 BackHandler，如设置二级页，会先行接管）。
-    BackHandler(enabled = tab != HomeTab.MONITOR.ordinal) {
+    // 必须先 collect 进度流：回调协程会挂起，直到系统提交（松手）才继续执行切页，
+    // 否则一启动就抢先执行、不等松手（表现为"还没松手就跳走/退桌面"）。
+    PredictiveBackHandler(enabled = tab != HomeTab.MONITOR.ordinal) { progress ->
+        progress.collect { }
         scope.launch { pagerState.animateScrollToPage(HomeTab.MONITOR.ordinal) }
     }
 
@@ -122,10 +131,12 @@ fun HomeScreen(
         // 内容区：直接铺满整屏（edge-to-edge 后一路延伸到手势条之后），并在其上叠一层毛玻璃氛围遮罩。
         // 页面背景一直到底，悬浮玻璃胶囊浮在这片页面之上；底部不再有一条「独立的背景色带」。
         // AGP9 / targetSdk 35+ 强制 edge-to-edge：系统栏不再自动避让，须用 insets 显式处理。
+        // 故意不在外框统一施加 statusBarsPadding：若在此压一层，整块内容都会被顶到状态栏下方，
+        // 滚动只会发生在「状态栏以下」的区域内，内容永远够不到透明状态栏，无法实现
+        // 「向下滚动时内容透过状态栏」的沉浸观感。状态栏避让交由各页面在自身滚动区内处理。
         Box(
             Modifier
                 .fillMaxSize()
-                .statusBarsPadding()
                 .imePadding(),
         ) {
             Box(
@@ -134,16 +145,23 @@ fun HomeScreen(
                     .background(if (enableBlur) glassOverlay else SolidColor(Color.Transparent)),
             ) {
                 // 桌面式横向拼接分页：页面左右滑动直接拼接切换，向左滑下一屏即从右侧推入。
+                // beyondViewportPageCount=0：只组合当前页，不预加载相邻页。监控台（0 号）是
+                // 每秒全量重建进程列表的重页，若允许预加载，在 1↔2 边界滑动时会被一并拉活组合，
+                // 出现"固定两三秒卡一下"（每次监控台一次大重组）。关闭预加载即可杜绝。
                 HorizontalPager(
                     state = pagerState,
                     modifier = Modifier.fillMaxSize(),
+                    beyondViewportPageCount = 0,
                 ) { page ->
                     when (items[page]) {
                         HomeTab.MONITOR -> MonitorScreen(mode)
                         HomeTab.TUNE -> AppManageTab(app, mode)
                         HomeTab.SCENES -> Placeholder("场景", "游戏 / 均衡 / 省电场景守护（开发中）")
                         HomeTab.MODULES -> Placeholder("模块", "KSU / Magisk 模块管理（开发中）")
-                        HomeTab.SETTINGS -> SettingsScreen(modeViewModel = modeViewModel)
+                        HomeTab.SETTINGS -> SettingsScreen(
+                            modeViewModel = modeViewModel,
+                            onNestedChanged = { settingsNested = it },
+                        )
                     }
                 }
             }
@@ -151,13 +169,20 @@ fun HomeScreen(
 
         // 玻璃导航栏：覆盖在内容之上、不挤占布局。
         // 悬浮模式下父级（含手势条区）透明呈现胶囊，贴底模式下整条铺满到底。
-        GlassNavigationBar(
-            items = items.map { GlassTab(it.label, it.icon) },
-            badges = badges,
-            selectedIndex = tab,
-            onSelect = { page -> scope.launch { pagerState.animateScrollToPage(page) } },
+        // 设置页进入二级/更高级子页时收起（滑出隐藏），让子页全屏显示；返回主页恢复。
+        AnimatedVisibility(
+            visible = !(tab == HomeTab.SETTINGS.ordinal && settingsNested),
+            enter = slideInVertically { it } ,
+            exit = slideOutVertically { it },
             modifier = Modifier.align(Alignment.BottomCenter),
-        )
+        ) {
+            GlassNavigationBar(
+                items = items.map { GlassTab(it.label, it.icon) },
+                badges = badges,
+                selectedIndex = tab,
+                onSelect = { page -> scope.launch { pagerState.animateScrollToPage(page) } },
+            )
+        }
     }
 }
 

@@ -7,7 +7,10 @@ import com.wuming.tinkerbox.core.mode.CapabilityState
 import com.wuming.tinkerbox.core.mode.ModeRepository
 import com.wuming.tinkerbox.core.mode.PermissionChecker
 import com.wuming.tinkerbox.core.mode.PermissionMode
+import com.wuming.tinkerbox.core.mode.ShizukuManager
 import com.wuming.tinkerbox.core.root.RootBackend
+import com.wuming.tinkerbox.core.root.RootDetector
+import com.wuming.tinkerbox.core.shell.RootShell
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,11 +36,17 @@ import kotlinx.coroutines.withContext
  */
 class ModeViewModel(app: Application) : AndroidViewModel(app) {
 
+    private val TAG = "TinkerBoxMode"
+
     private val repository = ModeRepository(app.applicationContext)
     private val checker = PermissionChecker(app.applicationContext)
 
     /** 全局降级轮询间隔（毫秒）。 */
     private val degradeIntervalMs = 3500L
+
+    /** 切换模式时自动获取权限的轮询：周期与上限（毫秒，约 12s 内取到即提交，否则退级）。 */
+    private val acquireTickMs = 500L
+    private val acquireMaxTicks = 24L
 
     private val _uiState = MutableStateFlow(ModeUiState())
     val uiState: StateFlow<ModeUiState> = _uiState.asStateFlow()
@@ -92,16 +101,111 @@ class ModeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 用户选择一个模式：持久化并写回最新能力状态。 */
+    /**
+     * 用户选择一个模式：先自动获取所需权限，取到才提交；取不到则退级到普通模式。
+     *
+     * 流程：
+     *  - 普通模式 / 权限本就可用 → 直接提交；
+     *  - Root → 触发一次 su 授权弹窗（root 管理器），轮询等待授权；
+     *  - Shizuku → 若服务未启动且持有 root 则尝试用 root 自启，再弹系统授权框，轮询等待；
+     *  - 达到时限仍不可用 → 降级到始终可用的普通模式（「退级」）。
+     */
     fun selectMode(mode: PermissionMode) {
+        android.util.Log.d(TAG, "selectMode(mode=$mode) called")
         viewModelScope.launch {
-            repository.save(mode)
-            val caps = detectAllFor(mode)
-            _uiState.value = _uiState.value.copy(
-                mode = mode,
-                capabilities = _uiState.value.capabilities + caps,
-                backend = modeBackend(mode, _uiState.value.capabilities + caps),
+            var caps = withContext(Dispatchers.IO) { detectAllFor(mode) }
+            android.util.Log.d(
+                TAG,
+                "selectMode: detect($mode) available=${caps[mode]?.available} detail=${caps[mode]?.detail}",
             )
+            if (mode == PermissionMode.NORMAL || caps[mode]?.available == true) {
+                applyMode(mode, caps)
+                return@launch
+            }
+
+            // 所需权限未就绪：先自动获取（su 弹窗 / Shizuku 授权），期间展示「获取中」。
+            android.util.Log.d(TAG, "selectMode: permission not ready, begin acquire($mode)")
+            _uiState.value = _uiState.value.copy(acquiring = true)
+            acquirePermission(mode)
+
+            // 轮询等待授权结果。
+            var ticks = 0L
+            while (ticks < acquireMaxTicks) {
+                delay(acquireTickMs)
+                ticks++
+                caps = withContext(Dispatchers.IO) { detectAllFor(mode) }
+                if (caps[mode]?.available == true) {
+                    applyMode(mode, caps)
+                    _uiState.value = _uiState.value.copy(acquiring = false)
+                    return@launch
+                }
+            }
+
+            // 超时仍未取到 → 退级到普通模式（始终可用）。
+            val normCaps = withContext(Dispatchers.IO) { detectAllFor(PermissionMode.NORMAL) }
+            applyMode(PermissionMode.NORMAL, normCaps)
+            _uiState.value = _uiState.value.copy(acquiring = false)
+        }
+    }
+
+    /** 提交模式：持久化并更新能力状态与后端。 */
+    private suspend fun applyMode(mode: PermissionMode, caps: Map<PermissionMode, CapabilityState>) {
+        repository.save(mode)
+        _uiState.value = _uiState.value.copy(
+            mode = mode,
+            capabilities = _uiState.value.capabilities + caps,
+            backend = modeBackend(mode, _uiState.value.capabilities + caps),
+            acquiring = false,
+        )
+    }
+
+    /**
+     * 自动获取权限：
+     *  - Root：再跑一次 su 探测触发 root 管理器授权弹窗（首次检测已触发，此处兜底）；
+     *  - Shizuku：服务未启动且持有 root 时用 root 自启，服务可用后弹系统授权框。
+     * 必须在主线程调用 Shizuku.requestPermission，故本函数由主进程协程执行。
+     */
+    private suspend fun acquirePermission(mode: PermissionMode) {
+        when (mode) {
+            PermissionMode.ROOT -> {
+                android.util.Log.d(TAG, "acquire(ROOT): run su detect to trigger root manager dialog")
+                withContext(Dispatchers.IO) { RootDetector.detect() }
+            }
+            PermissionMode.SHIZUKU -> {
+                android.util.Log.d(
+                    TAG,
+                    "acquire(SHIZUKU): available=${ShizukuManager.isAvailable()} " +
+                        "granted=${ShizukuManager.checkPermission()}",
+                )
+                if (!ShizukuManager.isAvailable()) {
+                    withContext(Dispatchers.IO) { tryStartShizukuViaRoot() }
+                    // 等服务真正起来（root 自启需要一两秒）。
+                    var waited = 0
+                    while (!ShizukuManager.isAvailable() && waited < 20) {
+                        delay(250)
+                        waited++
+                    }
+                }
+                // 服务在但未授权 → 触发系统授权框。
+                if (ShizukuManager.isAvailable() && !ShizukuManager.checkPermission()) {
+                    ShizukuManager.requestPermission()
+                }
+            }
+            else -> {
+                // NORMAL 无需任何权限。
+            }
+        }
+    }
+
+    /** 持有 root 时，尝试用 root 执行 Shizuku 官方 start.sh 自启服务（尽力而为）。 */
+    private fun tryStartShizukuViaRoot() {
+        val scripts = listOf(
+            "/storage/emulated/0/Android/data/moe.shizuku.privileged.api/start.sh",
+            "/storage/emulated/0/Android/data/io.rikka.shizuku/start.sh",
+        )
+        for (s in scripts) {
+            val r = RootShell.exec("sh $s")
+            if (r.isSuccess) break
         }
     }
 
@@ -165,4 +269,6 @@ data class ModeUiState(
     val capabilities: Map<PermissionMode, CapabilityState> = emptyMap(),
     val backend: RootBackend = RootBackend.None,
     val loading: Boolean = true,
+    /** 切换模式时正在自动获取权限（su/Shizuku 授权进行中）。 */
+    val acquiring: Boolean = false,
 )

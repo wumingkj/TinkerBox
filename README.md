@@ -21,7 +21,10 @@
   - 普通模式：`/proc` 直读（受 SELinux `hidepid` 隔离，仅自身进程可用）
   - Shizuku / Root：解析系统 `top -b -n 1`，以 `TIME+` 列为锚点精确定位 PID / %CPU，并映射为应用名 + 图标
   - 支持按 CPU / 应用名排序，点击进程可「停止进程」
+  - **流畅性优化**：`LazyColumn` 惰性组合 + 进程行按 pid 作重组 key + GPU 进度条动画收敛（600ms→150ms）+ 轮询绑定页面可见性，切走即停，保证滚动与 3 秒采样不卡顿
 - **电源监控**：电池电量、电流、电压（优先 BatteryManager 框架 API，回退 sysfs）
+- **GPU 负载 + 网络流量**：GPU **型号/厂商/GL 版本/分辨率/刷新率**（公开 API：离屏 EGL + `glGetString` + `Display`，**普通模式即可读**，对齐 AIDA64 无 root）；GPU 实时负载 / 频率（sysfs 直读，SELinux 受限时走特权执行器兜底）；网络下行 / 上行实时速率 + 累计流量（`TrafficStats`，普通模式即可读）
+- **数值智能单位**：字节按 B→KB→MB→GB→TB→PB→EB 动态进位（内存 / Swap / 网络总量与速率），电流超 1024mA 自动进位到 A
 
 ### 📦 应用管理
 - 应用列表三 Tab：第三方 / 系统 / 已冻结
@@ -42,6 +45,17 @@
 - 首次启动引导选择，选择界面实时展示各模式检测状态徽章
 - 已选模式持久化于 DataStore，每次启动校验权限，失效自动回退到引导页
 - 设置页随时切换模式，即时生效并持久化
+- **切换模式自动获取权限**：Root 自动触发 `su` 授权弹窗；Shizuku 无服务且持 root 时自动自启服务再弹授权框；约 12s 内授权成功即提交，失败自动退级到普通模式，无需手动去 root / Shizuku 里授权
+
+### 🎨 关于页（二级菜单 + 版本更新检测）
+- 中上部渲染**霓虹动态 Logo**（炫彩动效），下方依次展示 App 名称与版本号
+- **检测 App 版本更新**：自动拉取 GitHub Release `latest` 与本地版本比较（`https://github.com/wumingkj/TinkerBox`）
+- **去 GitHub 查看源码**、预留「暂时还没想到」占位卡片
+
+### 🧭 导航与沉浸式（edge-to-edge）
+- **多级页面过渡动画**：1/2/3 级页切换用 `AnimatedContent` 水平滑入/滑出，前进右滑入、后退左滑出，对齐系统返回手势
+- **二级页全屏**：进入设置二级页时隐藏一级页底栏导航，返回时恢复
+- **统一 edge-to-edge 容器**（`EdgeToEdgeScrollColumn` / `EdgeToEdgeLazyColumn`）：动态读取系统状态栏/手势条高度（随机型自适应），顶部首屏紧贴状态栏、向下滚动内容可一路滑到屏幕顶透过透明状态栏浮现；新增可滚动页面无需手动适配
 
 ### 🎨 主题体系（对齐 SukiSU 解耦架构）
 > **说明**：miuix ≠「胶囊底栏 + 液态玻璃」，而是整套 MIUI 风格组件库（ui / icons / preference / nav / blur）。
@@ -66,15 +80,18 @@
 | Shizuku 集成（官方 `rikka.shizuku`） | ✅ 完成 |
 | 应用管理（挂起/隐藏 + 打开/详情/卸载） | ✅ 完成核心 |
 | 已冻结实时扫描（去本地冻结记录） | ✅ 完成 |
-| 监控台 | ✅ 完成核心 |
+| 监控台（CPU频率 / SoC / 温度 / 内存Swap / 进程 / 电源 / GPU+网络） | ✅ 完成核心 |
 | 电源监控（电压/电流/功率/双电芯） | 🚧 核心完成，测量校准待收尾 |
 | 设置页（模式 / 主题二级菜单 / 返回上级） | ✅ 完成 |
+| 多级页面过渡动画（1/2/3 级水平滑动） | ✅ 完成 |
+| 关于页（霓虹 Logo + 版本更新检测 + GitHub 跳转） | ✅ 完成 |
+| 沉浸式 edge-to-edge 统一封装（状态栏动态避让 + 滚动穿透） | ✅ 完成 |
 | 主题体系（双风格 + 配色引擎 + 7 子功能开关） | ✅ 开关/持久化 + 渲染消费完成（浮底栏/液态玻璃/角标/彩虹滑块），含桌面式横向滑动切页 + 放大渲染半径滑块 |
 | 预留性返回手势开关 | ❌ 未修复（见 plan P5） |
 | 场景 / 模块管理 | 🚧 规划中 |
 | CPU / GPU 调校 | 🚧 规划中 |
 
-详细的开发计划与功能状态维护在 [`plan.md`](plan.md)。
+详细的开发计划在 [`plan.md`](plan.md)，每次发布的版本更新内容见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ---
 
@@ -99,14 +116,23 @@
 # 编译 Debug
 gradle :app:assembleDebug --no-daemon
 
-# Release（当前未启用混淆，可按需开启）
+# Release 已配置签名（release.jks；需先设环境变量，否则输出未签名包）
+$env:TB_RELEASE_STORE_PASS = "<你的密码>"
+$env:TB_RELEASE_KEY_PASS   = "<你的密码>"
 gradle :app:assembleRelease --no-daemon
+apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
 ```
 
 Debug 产物：
 ```
 app/build/outputs/apk/debug/app-debug.apk
 ```
+Release 产物（配置了 `signingConfigs.release`，已签名）：
+```
+app/build/outputs/apk/release/app-release.apk
+```
+
+> Release 签名凭据走环境变量 `TB_RELEASE_STORE_PASS` / `TB_RELEASE_KEY_PASS`（keyAlias 兜底 `tinkerbox`），不写入代码仓库；`release.jks` 与 `.keystore` 一样在 `.gitignore` 内，绝不上传。
 
 ### 无线安装（可选，针对 adb 多入口设备）
 ```bash

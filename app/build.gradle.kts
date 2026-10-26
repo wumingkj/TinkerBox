@@ -11,16 +11,25 @@ android {
         applicationId = "com.wuming.tinkerbox"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.4.0"
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = rootProject.file("release.jks")
+            storePassword = providers.environmentVariable("TB_RELEASE_STORE_PASS").getOrNull()
+            keyAlias = providers.environmentVariable("TB_RELEASE_KEY_ALIAS").getOrNull() ?: "tinkerbox"
+            keyPassword = providers.environmentVariable("TB_RELEASE_KEY_PASS").getOrNull()
+        }
     }
 
     buildTypes {
         debug {
-            // 包名保持固定（com.wuming.tinkerbox），仅版本号带 -debug 便于识别
             versionNameSuffix = "-debug"
         }
         release {
+            signingConfig = signingConfigs["release"]
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

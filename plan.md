@@ -88,6 +88,10 @@
 - [x] **主题改为二级菜单**（今日）：主界面仅显示「主题设置」入口，点击进入二级页（`mutableStateListOf<SettingsSubPage>` 页内导航栈）
 - [x] **多级界面返回上级**（今日）：`BackHandler(enabled = stack.isNotEmpty())` 拦截系统返回键，非空时 pop 栈顶而非退出 Activity；二级/三级界面逐级返回上级
 - [x] **底部导航返回策略**（今日）：主页非监控台 tab 时按返回先切回监控台，再按才退出（`HomeScreen` 的 `BackHandler`）
+- [x] **切换模式自动获取权限**（今日）：`ModeViewModel.selectMode` 在权限未就绪时自动发起授权而非直接退级
+  - Root → 自动触发一次 `su` 授权弹窗（KSU / Magisk 管理器），轮询等待授权结果
+  - Shizuku → 服务未启动且持有 root 时先用 root 执行官方 `start.sh` 自启服务，就绪后自动弹出系统授权框
+  - 轮询约 12s 内授权成功则提交并持久化，否则自动退级到始终可用的普通模式（无需手动去 root / Shizuku 应用里点授权）
 
 ### 主题体系重构（今日，对齐 SukiSU 解耦架构）
 > **miuix 概念澄清**：miuix ≠「胶囊底栏 + 液态玻璃」，而是整套 MIUI 风格组件库（ui/icons/preference/nav/blur）。
@@ -130,6 +134,13 @@
 - [x] 点击进程 → 操作弹窗：仅「停止进程」（`am force-stop`，Shizuku / Root）；普通模式提示无权限
   - 推断：进程操作与应用管理解耦，**监控台不提供冻结/停用**（避免误停应用/掉图标）
 - [x] 滚动条：固定高度 320dp 内滚动展示更多进程（当前读取 top 80 条）
+- [x] **GPU 负载 + 网络流量监控卡片**（今日）：
+  - `GpuMonitor`：GPU 当前负载率与频率（sysfs 直读优先，SELinux 受限时走 `execRaw` 特权执行器兜底）
+  - **GPU 静态属性 = 公开 API 读取**（今日 `GpuInfoReader`）：离屏 EGL context + `glGetString(GL_RENDERER/GL_VENDOR/GL_VERSION)` 读型号/厂商/GL 版本，`DisplayMetrics` + `Display.getRefreshRate()` 读分辨率/刷新率（取整）。**普通模式即可见，对齐 AIDA64 无 root 效果**；结果只读一次缓存，避免每秒重复开 EGL
+  - **实时频率单位修复**（今日）：kgsl `gpuclk` 多数设备返回 kHz，但骁龙 8Gen2 直接返回 Hz（220000000）曾被当 kHz 爆成 220000MHz；按量级启发式（≥1e6 视为 Hz→kHz）归一，`min/max_gpuclk` 同理
+  - `NetMonitor`：下行 / 上行实时速率 + 累计流量（`TrafficStats` 累计计数，普通模式即可读，规避 ColorOS/A15 对 `/proc/net/dev` 的 SELinux 拦截）
+  - 网络卡片两列布局修复：累计接收 / 发送改为 `NetMetric` 列式组件（此前嵌套两个 `fillMaxWidth` 的 `InfoRow` 在 Row 内相互抢宽而挤堆）
+- [x] **数值单位动态进位**（今日）：字节统一 `fmtBytes`（B→KB→MB→GB→TB→PB→EB）；电流超 1024mA 进位到 A——内存 / Swap / 网络总量、速率、电流均按量级选档
 
 ### 电源监控（P1，已完成核心）
 - [x] 电池电量 / 电压 / 电流 / 功率卡片（优先 BatteryManager 框架 API）
@@ -156,7 +167,10 @@
 ### P4｜设置扩展
 - [x] ~~主题切换（深色 / 浅色 / 跟随系统）~~ → 已升级为完整主题体系（明暗 + Monet + OLED + 双风格 + 主色 + 调色板），见「主题体系重构」
 - [x] **子功能实际渲染消费**：浮底栏 / 液态玻璃（`isGlass` 决定性渲染） / 导航角标 / 彩虹滑块 已全部消费到底栏组件；页面缩放 / 预见返回 仍待对应组件消费
-- [ ] 关于页完善（版本号、开源许可、更新渠道）
+- [x] **关于页完善（今日）**：霓虹动态 Logo + App 名称 + 版本号 + 「检测 App 版本更新」（拉取 GitHub Release latest 比较）/「去 GitHub 查看源码」/ 占位卡片
+- [x] **多级页面过渡动画（今日）**：1/2/3 级页 `AnimatedContent` 水平滑入/滑出，消除硬切硬退；二级页全屏隐藏底栏
+- [x] **沉浸式 edge-to-edge 统一封装（今日）**：`EdgeToEdgeScrollColumn` / `EdgeToEdgeLazyColumn` 动态读取状态栏/手势条高度，顶部紧贴、滚动穿透透明状态栏；统一各界面状态栏避让，消除「写死/离顶远」差异
+- [x] **监控台卡顿根治（今日）**：`LazyColumn` 惰性组合 + 进程行按 pid 重组 key + 惰性嵌套（外卡片/内进程行）+ GPU 动画收敛（600ms→150ms）+ 轮询绑定页面可见性切走即停
 - [ ] 液态玻璃底栏视觉细化（`isGlass` 半透明的胶囊玻璃感已接入 miuix-blur，待进一步的折射 / 高光打磨；液滴镜头已按需求移除）
 
 ### P5｜预留性返回手势（未修复）
@@ -186,6 +200,19 @@ adb -s 192.168.1.143:5555 shell am start -n \
 
 > 注意：adb 同时存在 TCP/IP 与 mDNS 两个入口指向同一台设备，命令必须加 `-s 192.168.1.143:5555`。
 > 包名固定 `com.wuming.tinkerbox`（不带 `-debug`），版本号带 `-debug` 后缀，便于覆盖升级。
+
+### Release 签名（今日新增）
+- 已生成根目录 `release.jks`（keytool：RSA 4096 / validity 10000 / alias `tinkerbox`），**绝不上传 Git**。
+- `app/build.gradle.kts` 新增 `signingConfigs.release`：`storePassword`/`keyPassword` 从环境变量 `TB_RELEASE_STORE_PASS`/`TB_RELEASE_KEY_PASS` 读取，不走仓库明文；`keyAlias` 兜底 `tinkerbox`。`release{}` 已引用该签名，`assembleRelease` 直接产出 `app-release.apk`（不再 unsigned）。
+- 构建前须设环境变量，否则 storePassword 为空 → 仍产出未签名包：
+
+```bash
+# PowerShell 一次性设置后构建
+$env:TB_RELEASE_STORE_PASS = "<你的密码>"
+$env:TB_RELEASE_KEY_PASS   = "<你的密码>"
+gradle :app:assembleRelease --no-daemon
+apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
+```
 
 ---
 

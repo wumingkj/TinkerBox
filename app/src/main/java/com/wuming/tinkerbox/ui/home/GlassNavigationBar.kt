@@ -183,9 +183,12 @@ fun GlassNavigationBar(
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        // 普通选态滑块（关闭液态玻璃时）：独立放大渲染背景，标签保持紧凑不随之伸缩。
+                        // 普通选态滑块（关闭液态玻璃时）独立放大渲染背景，标签保持紧凑不随之伸缩。
+                        // 液态玻璃与彩虹滑块冲突时，由液态玻璃让位：两者同开 → 液态玻璃不再压制彩虹滑块，
+                        // 滑块照常渲染并采用彩虹渐变填充，保证彩虹效果不被吞掉。
                         // matchParentSize 垫底 + graphicsLayer 放大绘制、圆角更大：渲染半径大但不变更布局约束（避免约束溢出崩溃）。
-                        if (!isGlass && pillProgress > 0.01f) {
+                        val showPill = (!isGlass || rainbow) && pillProgress > 0.01f
+                        if (showPill) {
                             Box(
                                 Modifier
                                     .matchParentSize()
