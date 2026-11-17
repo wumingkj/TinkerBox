@@ -44,6 +44,7 @@ import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -76,12 +77,17 @@ import androidx.activity.compose.PredictiveBackHandler
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.net.Uri
+import android.os.Build
 import android.widget.Toast
+import androidx.core.content.FileProvider
 import com.wuming.tinkerbox.AppBadgeOption
 import com.wuming.tinkerbox.TinkerBoxApp
 import com.wuming.tinkerbox.R
 import com.wuming.tinkerbox.core.mode.PermissionMode
+import com.wuming.tinkerbox.core.root.RootDetector
+import com.wuming.tinkerbox.core.shell.RootShell
 import com.wuming.tinkerbox.core.monitor.BatteryCells
 import com.wuming.tinkerbox.core.monitor.PowerConfig
 import com.wuming.tinkerbox.ui.common.EdgeToEdgeScrollColumn
@@ -92,6 +98,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
+import java.io.File
+import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -369,6 +377,12 @@ private fun SettingsHomePage(
 private const val GITHUB_REPO_URL = "https://github.com/wumingkj/TinkerBox"
 private const val GITHUB_API_RELEASES = "https://api.github.com/repos/wumingkj/TinkerBox/releases/latest"
 
+/** 远端 Release 抽象：版本号 + apk 直链（可为空）。 */
+private data class ReleaseInfo(
+    val version: String,
+    val apkUrl: String?,
+)
+
 /** 「关于」二级页：霓虹动态 logo 区 + App 名/版本号 + 操作卡片。 */
 @Composable
 private fun AboutPage(onBack: () -> Unit) {
@@ -380,15 +394,25 @@ private fun AboutPage(onBack: () -> Unit) {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
         }.getOrNull() ?: "0.0.0"
     }
-    // 版本检测状态：null=未检测 / ""=检测中 / 其他=远端最新版本号。
-    var latest by remember { mutableStateOf<String?>(null) }
+    // 版本检测状态：null=未检测 / 否则为远端 Release 信息。
+    var release by remember { mutableStateOf<ReleaseInfo?>(null) }
     var checking by remember { mutableStateOf(false) }
+    // 下载状态：null=无下载 / 否则为 0..100 进度。
+    var downloadProgress by remember { mutableStateOf<Int?>(null) }
+    // Debug 构建不参与更新：避免开发机每次都被拉到 release 版本误判。
+    val isDebug = remember { isDebuggable(context) }
+    val latest = release?.version
+    val hasNew = isNewerVersion(latest, versionName)
+
     val (checkDesc, checkTitle) = when {
+        isDebug -> "Debug 构建不参与版本更新，请使用 Release 包" to "检测 App 版本更新"
+        downloadProgress != null -> "正在下载 v$latest…" to "下载中 · ${downloadProgress}%"
         checking -> "正在拉取 GitHub 最新版本…" to "检测 App 版本更新"
-        latest == null -> "检查是否有可用新版本" to "检测 App 版本更新"
-        isNewerVersion(latest, versionName) -> "发现新版本 v$latest，可打开详情查看" to "检测到新版本 · v$latest"
+        release == null -> "检查是否有可用新版本" to "检测 App 版本更新"
+        hasNew -> (if (release?.apkUrl == null) "发现新版本 v$latest，点击前往 GitHub 下载" else "发现新版本 v$latest，点击下载并安装") to "检测到新版本 · v$latest"
         else -> "已是最新版本 v$versionName" to "App 已是最新版本"
     }
+    val desc = checkDesc
 
     EdgeToEdgeScrollColumn(
         modifier = Modifier.fillMaxSize(),
@@ -419,18 +443,43 @@ private fun AboutPage(onBack: () -> Unit) {
         // 操作卡片列：检测更新 / 查看源码 / 占位。
         AboutActionCard(
             title = checkTitle,
-            desc = if (checking) "正在拉取 GitHub 最新版本…" else checkDesc,
+            desc = desc,
             loading = checking,
+            progress = downloadProgress,
             onClick = {
-                if (!checking) {
+                if (isDebug) {
+                    showToast(context, "Debug 构建不参与版本更新")
+                    return@AboutActionCard
+                }
+                if (checking || downloadProgress != null) return@AboutActionCard
+                // 尚未检测：先去拉远端 Release。
+                if (release == null) {
                     checking = true
                     scope.launch {
-                        latest = fetchLatestVersion()
+                        val r = fetchLatestRelease()
                         checking = false
-                        if (latest == null) showToast(context, "网络异常，请稍后重试")
-                        else if (isNewerVersion(latest, versionName)) showToast(context, "发现新版本 v${latest}")
+                        release = r
+                        if (r == null) showToast(context, "网络异常，请稍后重试")
+                        else if (isNewerVersion(r.version, versionName)) showToast(context, "发现新版本 v${r.version}")
                         else showToast(context, "已是最新版本 v$versionName")
                     }
+                    return@AboutActionCard
+                }
+                // 已检测到新版本但没拉下直链：没法在当前进程下载，引导去 GitHub。
+                if (hasNew && release?.apkUrl == null) {
+                    showToast(context, "未获取到下载链接，将打开 GitHub Release")
+                    openUrl(context, GITHUB_REPO_URL + "/releases")
+                    return@AboutActionCard
+                }
+                // 已检测到新版本且有直链：下载并安装。
+                if (hasNew) {
+                    updateApp(
+                        context = context,
+                        scope = scope,
+                        url = release!!.apkUrl!!,
+                        latest = latest!!,
+                        onProgress = { downloadProgress = it },
+                    )
                 }
             },
         )
@@ -571,51 +620,58 @@ private fun AboutActionCard(
     title: String,
     desc: String,
     loading: Boolean = false,
+    progress: Int? = null,
     onClick: () -> Unit,
 ) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = !loading) { onClick() },
+            .clickable(enabled = !loading && progress == null) { onClick() },
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant,
         ),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = desc,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = desc,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (loading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (loading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    strokeWidth = 2.dp,
+            if (progress != null) {
+                Spacer(Modifier.height(10.dp))
+                LinearProgressIndicator(
+                    progress = { progress / 100f },
+                    modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.width(8.dp))
             }
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }
 
-/** 网络拉取 GitHub 最新 release 的版本号（tag_name），失败返回 null。 */
-private suspend fun fetchLatestVersion(): String? = withContext(Dispatchers.IO) {
+/** 网络拉取 GitHub 最新 release：版本号（tag_name）与首个 apk 资产直链。失败返回 null。 */
+private suspend fun fetchLatestRelease(): ReleaseInfo? = withContext(Dispatchers.IO) {
     runCatching {
         val conn = URL(GITHUB_API_RELEASES).openConnection() as HttpURLConnection
         conn.requestMethod = "GET"
@@ -626,14 +682,107 @@ private suspend fun fetchLatestVersion(): String? = withContext(Dispatchers.IO) 
         try {
             if (conn.responseCode != 200) return@withContext null
             val body = conn.inputStream.bufferedReader().use { it.readText() }
-            // 从 JSON 里提取 "tag_name":"v1.2.3"，私有仓库对 release 的 tag 依旧可读。
-            val m = Regex("\"tag_name\"\\s*:\\s*\"([^\"]+)\"").find(body)
-            val raw = m?.groupValues?.get(1)?.trim().orEmpty()
-            raw.removePrefix("v")
+            // 提取 "tag_name":"v1.2.3"。
+            val tag = Regex("\"tag_name\"\\s*:\\s*\"([^\"]+)\"").find(body)
+                ?.groupValues?.get(1)?.trim().orEmpty().removePrefix("v")
+                .takeIf { it.isNotBlank() } ?: return@withContext null
+            // 提取首个 .apk 资产的 browser_download_url。
+            val apkUrl = Regex(
+                "\"browser_download_url\"\\s*:\\s*\"([^\"]+\\.apk)\"",
+                RegexOption.IGNORE_CASE,
+            ).find(body)?.groupValues?.get(1)?.trim()
+            ReleaseInfo(version = tag, apkUrl = apkUrl?.takeIf { it.isNotBlank() })
         } finally {
             conn.disconnect()
         }
-    }.getOrNull()?.takeIf { it.isNotBlank() }
+    }.getOrNull()?.takeIf { it.version.isNotBlank() }
+}
+
+/** 下载新版 apk 到缓存目录并通过系统/Root 通道安装。 */
+private fun updateApp(
+    context: Context,
+    scope: kotlinx.coroutines.CoroutineScope,
+    url: String,
+    latest: String,
+    onProgress: (Int) -> Unit,
+) {
+    scope.launch {
+        onProgress(0)
+        // 下载到应用私有缓存：无需存储权限，FileProvider 可共享给系统安装器。
+        val target = File(context.cacheDir, "updates").apply { mkdirs() }
+        val apkFile = File(target, "tinkerbox-$latest.apk")
+        val ok = withContext(Dispatchers.IO) { downloadFile(url, apkFile, onProgress) }
+        if (!ok) {
+            showToast(context, "下载失败，请检查网络后重试")
+            return@launch
+        }
+        onProgress(100)
+        val installed = withContext(Dispatchers.IO) { trySilentInstall(apkFile) }
+        if (installed) {
+            showToast(context, "安装完成，v$latest")
+        } else {
+            showToast(context, "下载完成，请确认系统安装")
+            launchSystemInstaller(context, apkFile)
+        }
+    }
+}
+
+/** 以 HttpURLConnection 流式下载，回调 0..100 进度。返回是否成功。 */
+private fun downloadFile(url: String, target: File, onProgress: (Int) -> Unit): Boolean =
+    runCatching {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.connectTimeout = 10000
+        conn.readTimeout = 10000
+        conn.setRequestProperty("User-Agent", "TinkerBox")
+        conn.setRequestProperty("Accept", "application/octet-stream")
+        try {
+            if (conn.responseCode != 200) return false
+            val total = conn.contentLength.coerceAtLeast(0)
+            val input = conn.inputStream
+            input.use { ins ->
+                target.outputStream().use { out ->
+                    val buf = ByteArray(8192)
+                    var done = 0L
+                    var len: Int
+                    while (ins.read(buf).also { len = it } != -1) {
+                        out.write(buf, 0, len)
+                        done += len
+                        if (total > 0) {
+                            onProgress(((done * 100) / total).toInt().coerceIn(0, 100))
+                        }
+                    }
+                }
+            }
+            target.length() > 0
+        } finally {
+            conn.disconnect()
+        }
+    }.getOrElse { false }
+
+/** 尝试用 root 静默安装（pm install -r），失败返回 false 以便回退系统安装器。 */
+private fun trySilentInstall(apkFile: File): Boolean = runCatching {
+    val cmd = "pm install -r ${apkFile.absolutePath}"
+    require(RootDetector.detect() !is com.wuming.tinkerbox.core.root.RootBackend.None)
+    RootShell.exec(cmd).isSuccess
+}.getOrDefault(false)
+
+/** 通过 FileProvider 拉起系统安装器。 */
+@Suppress("DEPRECATION")
+private fun launchSystemInstaller(context: Context, apkFile: File) {
+    runCatching {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apkFile)
+        val intent = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+        context.startActivity(intent)
+    }.onFailure { e ->
+        android.util.Log.e("TinkerBoxUpdater", "启动系统安装器失败: ${e.message}")
+        showToast(context, "无法调起系统安装器")
+    }
 }
 
 /** 比较两个语义版本（x.y.z ...）：newer 严格大于 current 时为 true。 */
@@ -1154,6 +1303,15 @@ private enum class SettingsSubPage {
 private fun showToast(context: Context, message: String) {
     Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
 }
+
+/**
+ * 判断当前运行的是否为 Debug 构建。
+ *
+ * 直接查 ApplicationInfo 的 FLAG_DEBUGGABLE（release/install 由系统据此标记），
+ * 比 BuildConfig.DEBUG 更可靠——连签名、安装方式变化也如实反映，且无需开启 buildConfig。
+ */
+private fun isDebuggable(context: Context): Boolean =
+    (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
 
 /** 用系统浏览器打开链接。 */
 private fun openUrl(context: Context, url: String) {

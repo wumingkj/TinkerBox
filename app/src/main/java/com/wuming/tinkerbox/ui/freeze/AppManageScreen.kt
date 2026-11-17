@@ -6,6 +6,7 @@ import android.net.Uri
 import android.provider.Settings
 import android.util.Log
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
@@ -52,6 +54,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wuming.tinkerbox.core.apps.AppListItem
 import com.wuming.tinkerbox.core.apps.FreezeMode
@@ -78,6 +81,8 @@ fun AppManageScreen(viewModel: AppManageViewModel) {
     var sortKey by remember { mutableStateOf(SortKey.NAME) }
     var ascending by remember { mutableStateOf(true) }
     var showSortMenu by remember { mutableStateOf(false) }
+    // 「全部解冻」二次确认框是否弹出（一键解冻动作很大，需确认避免误触全解）。
+    var showUnfreezeAllConfirm by remember { mutableStateOf(false) }
     val tabs = arrayOf("第三方", "系统", "已冻结")
 
     Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
@@ -146,7 +151,22 @@ fun AppManageScreen(viewModel: AppManageViewModel) {
                 Tab(
                     selected = tabIndex == index,
                     onClick = { tabIndex = index },
-                    text = { Text(title) },
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(title)
+                            Spacer(Modifier.width(6.dp))
+                            // 界面内角标：在 Tab 上直显各类计数（尤其是「已冻结」数），
+                            // 与底栏角标呼应，让冻结状态在页面内也能一目了然。
+                            TabCountBadge(
+                                count = when (index) {
+                                    0 -> state.thirdPartyApps.size
+                                    1 -> state.systemApps.size
+                                    else -> state.frozenApps.size
+                                },
+                                highlighted = index == 2 && state.frozenApps.isNotEmpty(),
+                            )
+                        }
+                    },
                 )
             }
         }
@@ -167,7 +187,7 @@ fun AppManageScreen(viewModel: AppManageViewModel) {
                         onQueryChange = { query = it },
                         sortKey = sortKey,
                         ascending = ascending,
-                        onUnfreezeAll = viewModel::unfreezeAll,
+                        onUnfreezeAll = { showUnfreezeAllConfirm = true },
                         onUnfreezeClick = { app ->
                             pendingAction = PendingAction(app, mode = null, currentlyFrozen = true)
                         },
@@ -207,6 +227,54 @@ fun AppManageScreen(viewModel: AppManageViewModel) {
                 else viewModel.freeze(action.pkg, mode)
                 pendingAction = null
             },
+        )
+    }
+
+    // 「全部解冻」二次确认：批量解冻影响面大，需明确确认而不是一下全解。
+    if (showUnfreezeAllConfirm) {
+        AlertDialog(
+            onDismissRequest = { showUnfreezeAllConfirm = false },
+            title = { Text("全部解冻") },
+            text = {
+                Text(
+                    "即将解冻全部 ${state.frozenApps.size} 个已冻结应用。\n\n" +
+                        "这些应用解冻后将恢复在桌面上可见、可正常运行，确定要全部解冻吗？",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showUnfreezeAllConfirm = false
+                        viewModel.unfreezeAll()
+                    },
+                ) { Text("全部解冻") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUnfreezeAllConfirm = false }) { Text("取消") }
+            },
+        )
+    }
+}
+
+/** 界面内计数角标：小圆点内显示数量；[highlighted] 时以主色强调（如「已冻结」）。 */
+@Composable
+private fun TabCountBadge(count: Int, highlighted: Boolean) {
+    if (count <= 0) return
+    Box(
+        modifier = Modifier
+            .size(18.dp)
+            .clip(CircleShape)
+            .background(
+                if (highlighted) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.surfaceVariant,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = if (count > 99) "99+" else "$count",
+            fontSize = 10.sp,
+            color = if (highlighted) MaterialTheme.colorScheme.onPrimary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

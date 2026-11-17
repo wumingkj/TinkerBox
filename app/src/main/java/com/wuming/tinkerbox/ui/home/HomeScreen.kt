@@ -50,6 +50,7 @@ import com.wuming.tinkerbox.ui.freeze.AppManageScreen
 import com.wuming.tinkerbox.ui.freeze.AppManageViewModel
 import com.wuming.tinkerbox.ui.monitor.MonitorScreen
 import com.wuming.tinkerbox.ui.screen.SettingsScreen
+import com.wuming.tinkerbox.ui.terminal.TerminalScreen
 import com.wuming.tinkerbox.ui.theme.LocalEnableBlur
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -157,7 +158,7 @@ fun HomeScreen(
                         HomeTab.MONITOR -> MonitorScreen(mode)
                         HomeTab.TUNE -> AppManageTab(app, mode)
                         HomeTab.SCENES -> Placeholder("场景", "游戏 / 均衡 / 省电场景守护（开发中）")
-                        HomeTab.MODULES -> Placeholder("模块", "KSU / Magisk 模块管理（开发中）")
+                        HomeTab.MODULES -> TerminalScreen()
                         HomeTab.SETTINGS -> SettingsScreen(
                             modeViewModel = modeViewModel,
                             onNestedChanged = { settingsNested = it },
@@ -169,9 +170,12 @@ fun HomeScreen(
 
         // 玻璃导航栏：覆盖在内容之上、不挤占布局。
         // 悬浮模式下父级（含手势条区）透明呈现胶囊，贴底模式下整条铺满到底。
-        // 设置页进入二级/更高级子页时收起（滑出隐藏），让子页全屏显示；返回主页恢复。
+        // 设置页进入二级/更高级子页、或处于「模块」shell 终端页时收起（滑出隐藏），
+        // 让子页 / 终端全屏显示；返回主页恢复。
+        // 滑入 / 直接跳转进入时：底栏均随 tab 切换以同样动画隐藏，避免挡在终端上方碍事。
         AnimatedVisibility(
-            visible = !(tab == HomeTab.SETTINGS.ordinal && settingsNested),
+            visible = !(tab == HomeTab.SETTINGS.ordinal && settingsNested) &&
+                tab != HomeTab.MODULES.ordinal,
             enter = slideInVertically { it } ,
             exit = slideOutVertically { it },
             modifier = Modifier.align(Alignment.BottomCenter),

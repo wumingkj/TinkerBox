@@ -35,11 +35,20 @@
 - 新增 `EdgeToEdgeScrollColumn` / `EdgeToEdgeLazyColumn` 公共容器：动态读取系统状态栏 / 手势条高度（随机型自适应，非写死），顶部首屏紧贴状态栏下方不重合、向下滚动内容可一路滑到屏幕顶透过透明状态栏浮现
 - 统一封装后，新增可滚动页面无需再手动适配状态栏，风格保持一致
 
+### 🖥 内置终端：接入 termux 仿真层
+- **源码迁移 termux `terminal-emulator`**：把 termux-app 的纯 Java 仿真核心迁入 `core/terminal/em/`（`TerminalEmulator` VT100 解析 / `TerminalBuffer` / `TerminalRow` / `TextStyle` / `TerminalColors` / `TerminalColorScheme` / `ByteQueue` / `WcWidth` / `KeyHandler` 等 15 个类）
+- **无 NDK / 纯 Java**：裁剪 `TerminalSessionClient` 为无 PTY 依赖的最小接口，去掉 PTY 会话强依赖，全程 `ProcessBuilder`，无需 JNI / so
+- **彩色 VT100 渲染**：新增 `EmulatorRenderer` 逐格读屏幕缓冲，`TextStyle.decodeForeColor/decodeBackColor` 映射 ANSI 前景/背景色（含 256 色与真彩），支持 加粗 / 斜体 / 反显，光标格反显成色块
+- **真实仿真行为**：ANSI 颜色、光标移动、清屏、回车单行覆盖、按行宽折行真实生效，替代此前的整行朴素文本输出
+- **接入会话**：`EmulatorSession` 把 `ProcessBuilder` 字节流喂入 `TerminalEmulator.append()`，`version` 驱动重绘；`TerminalScreen` 按实际像素换算虚拟列/行并 responsive resize
+- 已知边界：当前无 PTY，shell `$PS1` 提示符回显与 vim 类全屏交互暂不完整；权限默认普通 shell，`su` 手动提权（对齐 Termux）
+
 ### 🛠 修复
 - 设置页二级页滚动无法透过状态栏（此前外层全局 padding 把内容钉死在状态栏下方）；已改为统一 edge-to-edge 容器
 - 应用管理 tab「执行身份」与系统状态栏时间重叠、搜索框/全部解冻与列表间距过大，已对齐顶栏避让并消除双重内边距
 - 废弃 API 清理：`Icons.Filled.Sort` → `Icons.AutoMirrored.Filled.Sort`、`TabRow` → `PrimaryTabRow`，消除编译告警
 - 各界面状态栏避让统一为动态读取，消除「写死」观感差异
+- `TerminalSessionClient.java` 预置 UTF-8 BOM 导致 `javac`「非法字符 \ufeff」——重写为无 BOM 的 UTF-8 源文件
 
 ---
 

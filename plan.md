@@ -158,11 +158,16 @@
 - [ ] 守护进程可用事件驱动（轮询而非 inotify，因 sysfs 不触发 inotify）
 - [ ] 进程/温度历史曲线、负载图
 
-### P3｜调校 / 场景 / 模块
+### P3｜调校 / 场景 / 模块 / 终端
 - [ ] CPU / GPU 调校（需 Root：gov、频率表、调度），届时再评估是否单列「调校/tune」tab
 - [ ] 场景配置（游戏 / 均衡 / 省电）+ 场景守护
 - [ ] 模块管理（KSU / Magisk 模块增删启停）
 - [ ] 应用管理优化：批量冻结 / 批量解冻全选、按需过滤系统预禁用内部组件
+- [ ] **内置终端 CLI（今日立项，源码迁移决策）**：见下方「终端 CLI」专项
+  - 采纳「模块」tab 承载，全屏二级页（复用设置页隐藏底栏机制）
+  - 终端仿真核心与 shell 会话管理**源码迁移自 termux-app**（非 Maven 依赖），以便自由定制 Compose 多会话 UI 与 su 提权
+  - 权限模型：普通 shell（默认，无权限）+ 手动输入 `su` 经 `RootShell` 提权到 root shell（对齐 Termux 模型）
+  - 多会话：可创建 / 删除 / 切换（termux 已把 emulator / view / session 拆为独立库，多会话天然契合）
 
 ### P4｜设置扩展
 - [x] ~~主题切换（深色 / 浅色 / 跟随系统）~~ → 已升级为完整主题体系（明暗 + Monet + OLED + 双风格 + 主色 + 调色板），见「主题体系重构」
@@ -181,6 +186,47 @@
     - 目标设备 SDK 35 预测返回仍需系统开发者选项门控？→ 用户实测开发者选项关闭后 SukiSU 仍有效，故排除
     - 对照 SukiSU：其 `setEnableOnBackInvokedCallback(context.applicationInfo, ...)` 在 `ColorPaletteScreen` 切换时也调用，说明可运行时生效；需核实本工程 Activity 是否使用 `OnBackInvokedDispatcher`/Compose `BackHandler` 与系统 flag 协调
     - 试验方案：改为 Manifest 静态 `android:enableOnBackInvokedCallback="true"` 验证动画是否出现，反向定位是 flag 未生效还是系统动画门控问题
+
+---
+
+### 终端 CLI（专项 · 源码迁移 termux-app）
+
+> 目标：在「模块」tab 提供类 Termux 的内置终端，支持创建 / 删除 / 切换多会话。
+> 决策：**迁移源码而非 Maven 依赖**（termux 已发布 `com.termux:terminal-emulator` / `com.termux:terminal-view` 0.118.0 到 Maven，但仍选源码迁移，便于自由定制 Compose 多会话 UI 与 su 提权；且 terminal-view 核心仍是经典 `TerminalView.java`，须按本项目 Compose 桥接改造）。
+
+**参考仓库**：`../termux-app-ref`（`git clone --depth 1` 到项目外兄弟目录，避免污染本项目 git 仓库）。
+termux 模块拆解（各自独立库，为迁移提供清晰边界）：
+- `terminal-emulator/` — 纯仿真核心（`TerminalEmulator.java` / `TerminalBuffer` / `TerminalSession` / `WcWidth` …），**不含 UI**
+- `terminal-view/` — `TerminalView.java`（经典 View + `TerminalRenderer` + 手势/文本选择），**可独立出工程**
+- `termux-shared/` — shell 会话运行环境（`TerminalSession` 的 shell 子进程 / PTY / 环境变量），多会话宿主
+- 关键点：`terminal-emulator` 内含 **NDK/JNI**（`JNI::createSubprocess` 建子进程、`src/main/jni/Android.mk` + abiFilters），源码迁移需连带 so 打包；`TerminalSession` 用 `mHandle`(UUID)/`mSessionName`/`mShellPid`/PTY fd 唯一标识一个会话，天然支撑「多会话」
+
+**本项目接入规划**（进度见文末「终端 CLI · 进展」）：
+1. `core/terminal/` 新建存放迁移源码：`core/terminal/emulator/`（仿真）+ `core/terminal/session/`（会话）+ 保留 `core/terminal/` 原生 so 打包
+2. Compose 桥接：`AndroidView{ TerminalView(session) }` 包装 `TerminalView`,实现多会话时切换 `setTermSession` 显示不同会话
+3. 多会话 UI：`ModuleScreen`（或 `TerminalScreen`）顶部会话条（可横向滑动）提供 新建 / 删除 / 切换；会话列表可常驻（参考 termux 会话抽屉）
+4. 权限模型：默认普通 shell（`sh`，普通 UID）；输入 `su` 走现有 `RootShell` 通道/`RootDetector` 校验 uid=0 切 root shell；NORMAL 模式也可用普通终端
+5. `$PREFIX`/`$HOME` 指向本项目私有目录 `filesDir/usr`、`filesDir/home`（不沿 termux 的 `com.termux` 路径）；termux 源码内写死的绝对路径宏需为本项目替换或提供（骨架版 `TerminalSession` 用 `ProcessBuilder`，未设 `$PREFIX`，待接仿真层时补）
+6. 迁移注意：`minSdk` 26 需与 termux 各模块对齐；`TerminalView` 的 `mTermSession` 切换即多会话显示切换；新增 `TerminalBackend` 或复用 `RootBackend`
+
+**风险**：
+- **NDK 风险已规避**：第一关改走 `ProcessBuilder` 纯 Java 后端，绕过 `Os.fork`/NDK JNI（termux 因孩子进程 runtime 状态未知才用 C 实现；本项目无 NDK 环境，故先用 ProcessBuilder 跑通链路；PTY 交互留待接仿真层时视情况还原 termux native）
+- termux 源码最新主干用 AGP/依赖可能与本项目 9.1.0 有版本摩擦，先做最小可编译迁移（只捞 emulator + view + shell session 三类类）
+- NTFS 上 termux 有 NDK so，首次编译需确保 NDK 已装（`externalNativeBuild` abiFilters x86/x86_64/armv7/arm64）
+
+**终端 CLI · 进展**
+- [x] **第一关·最小终端骨架（已验证编译+真机安装）**：`core/terminal/TerminalSession.kt`（基于 `ProcessBuilder` 的 shell 会话后端，异步流式输出、独立 `id` 支撑多会话）＋ `ui/terminal/TerminalScreen.kt`（多会话会话条：新建/切换/关闭 + 黑底等宽输出 + 底部命令输入行）；HomeScreen「模块」tab 由占位替换为 `TerminalScreen()`；`gradle :app:assembleDebug` BUILD SUCCESSFUL
+- [x] **第四关（仿真层）· 已迁入 termux `terminal-emulator` 纯 Java 仿真核心**（替代第二/三关先行的顺序，先出仿真效果）：
+  - `core/terminal/em/` 迁移 15 个 Java 核心类：`TerminalEmulator`（VT100 解析）/ `TerminalBuffer` / `TerminalRow` / `TextStyle` / `TerminalColors` / `TerminalColorScheme` / `ByteQueue` / `WcWidth` / `KeyHandler` 等
+  - 裁剪 `TerminalSessionClient` 为无 PTY 依赖的最小接口（7 方法），彻底去掉 NDK/JNI 依赖
+  - `EmulatorSession.kt`：把现有 `ProcessBuilder` 会话的字节流喂入 `TerminalEmulator.append()`，`version` StateFlow 驱动 Compose 重绘
+  - `TerminalScreen.kt`：用 `BoxWithConstraints` 按实际像素换算虚拟列/行，初始化/resize 仿真器实现真实折行宽度
+  - `EmulatorRenderer`：逐格读 `TerminalRow.mText` + `getStyle(col)`，经 `TextStyle.decodeForeColor/BackColor` + 配色表映射 ANSI 颜色（含 256 色/真彩），绘制反显光标，支持加粗/斜体
+  - 效果：ANSI 颜色 / 光标移动 / 清屏 / 回车覆盖 / 折行真实生效，替代此前的整行朴素文本
+  - 编译：`:app:compileDebugKotlin` 通过（另修复 `TerminalSessionClient.java` 残留 UTF-8 BOM 导致的 `javac`「非法字符」报错，重写为无 BOM 源码；真机最终构建/安装待确认）
+- [ ] **第四关（收尾）· PTY / 全屏交互**：当前无 PTY，shell `$PS1` 提示符回显与 vim 类「读光标 + 全屏重绘」程序仍不完整；后续按需还原 termux native（PTY 子进程）或继续纯 Java 推进
+- [ ] 第二关·su 提权：普通 shell 默认；输入 `su` 走 `RootShell`/`RootDetector` 校验 uid=0 切 root
+- [ ] 第三关·设置子菜单：设置页新增「终端」入口（fontSize / 配色 / 背景 / 字体，持久化）
 
 ---
 
